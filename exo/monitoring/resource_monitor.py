@@ -17,16 +17,16 @@ class ResourceMonitor:
     Monitors system resources including RAM and GPU utilization.
     Provides methods to collect resource usage and format it for display.
     """
-    
+
     def __init__(self):
         self.last_update_time = 0
         self.update_interval = 2.0  # Update at most every 2 seconds
         self.is_tty = sys.stdout.isatty()
         self.system = platform.system()
-        
+
         # Initialize GPU monitoring based on platform and available libraries
         self.gpu_monitor = self._initialize_gpu_monitor()
-        
+
     def _initialize_gpu_monitor(self):
         """Initialize the appropriate GPU monitor based on the system and available libraries."""
         if self.system == "Darwin":  # macOS
@@ -54,34 +54,34 @@ class ResourceMonitor:
                 except (ImportError, ModuleNotFoundError):
                     return DummyGPUMonitor()
         return DummyGPUMonitor()
-    
+
     async def get_resource_usage(self) -> Dict:
         """
         Get current resource usage including RAM and GPU.
-        
+
         Returns:
             Dict containing resource usage information
         """
         current_time = time.time()
-        
+
         # Only update at most every update_interval seconds
         if current_time - self.last_update_time < self.update_interval:
             return {}
-            
+
         self.last_update_time = current_time
-        
+
         # Get RAM usage
         ram_usage = self._get_ram_usage()
-        
+
         # Get GPU usage
         gpu_usage = await self.gpu_monitor.get_gpu_usage()
-        
+
         return {
             "timestamp": current_time,
             "ram": ram_usage,
             "gpu": gpu_usage
         }
-    
+
     def _get_ram_usage(self) -> Dict:
         """Get RAM usage information."""
         mem = psutil.virtual_memory()
@@ -91,26 +91,26 @@ class ResourceMonitor:
             "used": mem.used,
             "percent": mem.percent
         }
-    
+
     def format_resource_usage(self, usage: Dict, node_id: str, is_local: bool = False) -> str:
         """
         Format resource usage for display in the terminal.
-        
+
         Args:
             usage: Resource usage dictionary
             node_id: ID of the node
             is_local: Whether this is the local node
-            
+
         Returns:
             Formatted string for display
         """
         if not usage or "ram" not in usage or "gpu" not in usage:
             return f"Node {node_id}: No resource data available"
-        
+
         # Format RAM usage
         ram = usage["ram"]
         ram_str = f"RAM: {ram['used'] / (1024**3):.1f}GB/{ram['total'] / (1024**3):.1f}GB ({ram['percent']}%)"
-        
+
         # Format GPU usage
         gpu = usage["gpu"]
         if gpu.get("available", False):
@@ -119,16 +119,17 @@ class ResourceMonitor:
                 gpu_str += f", Util: {gpu['utilization']}%"
         else:
             gpu_str = "GPU: Not available"
-        
+
         # Add indicator for local node
         prefix = "* " if is_local else "  "
-        
-        return f"{prefix}Node {node_id}: {ram_str} | {gpu_str}"
+
+        # Format for Rich UI
+        return f"{prefix}Node {node_id[:8]}: {ram_str} | {gpu_str}"
 
 
 class GPUMonitorBase:
     """Base class for GPU monitors."""
-    
+
     async def get_gpu_usage(self) -> Dict:
         """Get GPU usage information."""
         return {"available": False}
@@ -141,21 +142,21 @@ class DummyGPUMonitor(GPUMonitorBase):
 
 class NvidiaGPUMonitor(GPUMonitorBase):
     """Monitor for NVIDIA GPUs using pynvml."""
-    
+
     async def get_gpu_usage(self) -> Dict:
         try:
             import pynvml
             pynvml.nvmlInit()
-            
+
             # Get the first GPU
             handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-            
+
             # Get memory info
             mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-            
+
             # Get utilization info
             util_info = pynvml.nvmlDeviceGetUtilizationRates(handle)
-            
+
             result = {
                 "available": True,
                 "name": pynvml.nvmlDeviceGetName(handle),
@@ -165,7 +166,7 @@ class NvidiaGPUMonitor(GPUMonitorBase):
                 "memory_percent": (mem_info.used / mem_info.total) * 100,
                 "utilization": util_info.gpu
             }
-            
+
             pynvml.nvmlShutdown()
             return result
         except Exception as e:
@@ -176,21 +177,21 @@ class NvidiaGPUMonitor(GPUMonitorBase):
 
 class AMDGPUMonitor(GPUMonitorBase):
     """Monitor for AMD GPUs."""
-    
+
     async def get_gpu_usage(self) -> Dict:
         if platform.system() == "Linux":
             return await self._get_linux_amd_gpu_usage()
         elif platform.system() == "Windows":
             return await self._get_windows_amd_gpu_usage()
         return {"available": False}
-    
+
     async def _get_linux_amd_gpu_usage(self) -> Dict:
         try:
             import pyamdgpuinfo
-            
+
             gpu = pyamdgpuinfo.get_gpu(0)
             vram_info = gpu.memory_info
-            
+
             return {
                 "available": True,
                 "name": gpu.name,
@@ -203,17 +204,17 @@ class AMDGPUMonitor(GPUMonitorBase):
             if DEBUG >= 2:
                 print(f"Error getting AMD GPU info on Linux: {e}")
             return {"available": False}
-    
+
     async def _get_windows_amd_gpu_usage(self) -> Dict:
         try:
             from pyrsmi import rocml
-            
+
             rocml.smi_initialize()
-            
+
             gpu_name = rocml.smi_get_device_name(0)
             total_memory = rocml.smi_get_device_memory_total(0)
             used_memory = rocml.smi_get_device_memory_usage(0)
-            
+
             result = {
                 "available": True,
                 "name": gpu_name,
@@ -222,7 +223,7 @@ class AMDGPUMonitor(GPUMonitorBase):
                 "free_memory": total_memory - used_memory,
                 "memory_percent": (used_memory / total_memory) * 100 if total_memory > 0 else 0
             }
-            
+
             rocml.smi_shutdown()
             return result
         except Exception as e:
@@ -233,7 +234,7 @@ class AMDGPUMonitor(GPUMonitorBase):
 
 class AppleSiliconGPUMonitor(GPUMonitorBase):
     """Monitor for Apple Silicon GPUs."""
-    
+
     async def get_gpu_usage(self) -> Dict:
         try:
             # Use subprocess to get GPU memory info from sysctl
@@ -243,7 +244,7 @@ class AppleSiliconGPUMonitor(GPUMonitorBase):
                 stderr=asyncio.subprocess.PIPE
             )
             stdout, _ = await proc.communicate()
-            
+
             # Try to get Metal GPU memory allocation
             metal_proc = await asyncio.create_subprocess_exec(
                 "sysctl", "-n", "iogpu.wired_limit_mb", "iogpu.wired_size_mb",
@@ -251,13 +252,13 @@ class AppleSiliconGPUMonitor(GPUMonitorBase):
                 stderr=asyncio.subprocess.PIPE
             )
             metal_stdout, _ = await metal_proc.communicate()
-            
+
             if metal_proc.returncode == 0:
                 values = metal_stdout.decode().strip().split("\n")
                 if len(values) >= 2:
                     limit_mb = int(values[0])
                     used_mb = int(values[1])
-                    
+
                     return {
                         "available": True,
                         "name": "Apple Silicon GPU",
@@ -266,7 +267,7 @@ class AppleSiliconGPUMonitor(GPUMonitorBase):
                         "free_memory": (limit_mb - used_mb) * 1024 * 1024,
                         "memory_percent": (used_mb / limit_mb) * 100 if limit_mb > 0 else 0
                     }
-            
+
             # Fallback: estimate GPU memory as a portion of system memory
             if proc.returncode == 0:
                 values = stdout.decode().strip().split("\n")
@@ -274,7 +275,7 @@ class AppleSiliconGPUMonitor(GPUMonitorBase):
                     total_memory = int(values[0])
                     # Estimate GPU memory as 30% of system memory for Apple Silicon
                     estimated_gpu_memory = total_memory * 0.3
-                    
+
                     # Try to get actual GPU usage from activity monitor data
                     # This is a rough approximation
                     gpu_usage_percent = 0
@@ -285,7 +286,7 @@ class AppleSiliconGPUMonitor(GPUMonitorBase):
                             gpu_usage_percent = 30  # Rough estimate when MLX is active
                     except:
                         pass
-                    
+
                     return {
                         "available": True,
                         "name": "Apple Silicon GPU (estimated)",
@@ -295,7 +296,7 @@ class AppleSiliconGPUMonitor(GPUMonitorBase):
                         "memory_percent": gpu_usage_percent,
                         "utilization": gpu_usage_percent
                     }
-            
+
             return {"available": False}
         except Exception as e:
             if DEBUG >= 2:
@@ -305,7 +306,7 @@ class AppleSiliconGPUMonitor(GPUMonitorBase):
 
 class IntelGPUMonitor(GPUMonitorBase):
     """Monitor for Intel integrated GPUs."""
-    
+
     async def get_gpu_usage(self) -> Dict:
         # Intel GPUs on Mac don't have good monitoring tools
         # Return a basic structure with limited info

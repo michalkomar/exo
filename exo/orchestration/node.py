@@ -76,6 +76,9 @@ class Node:
     asyncio.create_task(self.periodic_topology_collection(2.0))
     asyncio.create_task(self.periodic_resource_monitoring(3.0))
 
+    # Enable resource display
+    resource_display.enable()
+
   async def stop(self) -> None:
     await self.discovery.stop()
     await self.server.stop()

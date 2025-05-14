@@ -25,20 +25,39 @@ class TopologyViz:
     self.partitions: List[Partition] = []
     self.node_id = None
     self.node_download_progress: Dict[str, RepoProgressEvent] = {}
+    self.node_resources: Dict[str, Dict] = {}
+    self.local_node_id = None
     self.requests: OrderedDict[str, Tuple[str, str]] = {}
 
     self.console = Console()
     self.layout = Layout()
-    self.layout.split(Layout(name="main"), Layout(name="prompt_output", size=15), Layout(name="download", size=25))
+    self.layout.split(
+      Layout(name="main"),
+      Layout(name="bottom", size=40)
+    )
+
+    # Split the bottom section into resource, prompt_output, and download
+    self.layout["bottom"].split(
+      Layout(name="resource", size=10),
+      Layout(name="prompt_output", size=15),
+      Layout(name="download", size=15)
+    )
+
     self.main_panel = Panel(self._generate_main_layout(), title="Exo Cluster (0 nodes)", border_style="bright_yellow")
+    self.resource_panel = Panel("", title="Resource Usage", border_style="green")
     self.prompt_output_panel = Panel("", title="Prompt and Output", border_style="green")
     self.download_panel = Panel("", title="Download Progress", border_style="cyan")
+
     self.layout["main"].update(self.main_panel)
+    self.layout["resource"].update(self.resource_panel)
     self.layout["prompt_output"].update(self.prompt_output_panel)
     self.layout["download"].update(self.download_panel)
 
-    # Initially hide the prompt_output panel
+    # Initially hide the resource, prompt_output, and download panels
+    self.layout["resource"].visible = False
     self.layout["prompt_output"].visible = False
+    self.layout["download"].visible = False
+
     self.live_panel = Live(self.layout, auto_refresh=False, console=self.console)
     self.live_panel.start()
 
@@ -58,11 +77,31 @@ class TopologyViz:
     self.requests[request_id] = [self.requests.get(request_id, ["", ""])[0], output]
     self.refresh()
 
+  def update_resource_display(self, node_resources: Dict[str, Dict], local_node_id: Optional[str] = None):
+    """
+    Update the resource usage display.
+
+    Args:
+        node_resources: Dictionary mapping node IDs to resource data
+        local_node_id: ID of the local node
+    """
+    self.node_resources = node_resources
+    self.local_node_id = local_node_id
+    self.refresh()
+
   def refresh(self):
     self.main_panel.renderable = self._generate_main_layout()
     # Update the panel title with the number of nodes and partitions
     node_count = len(self.topology.nodes)
     self.main_panel.title = f"Exo Cluster ({node_count} node{'s' if node_count != 1 else ''})"
+
+    # Update and show/hide resource panel
+    if self.node_resources:
+      self.resource_panel.renderable = self._generate_resource_layout()
+      self.layout["resource"].update(self.resource_panel)
+      self.layout["resource"].visible = True
+    else:
+      self.layout["resource"].visible = False
 
     # Update and show/hide prompt and output panel
     if any(r[0] or r[1] for r in self.requests.values()):
@@ -328,6 +367,53 @@ class TopologyViz:
 
     # Convert to string
     return "\n".join("".join(str(char) for char in row) for row in visualization)
+
+  def _generate_resource_layout(self) -> Table:
+    """
+    Generate a table displaying resource usage for all nodes.
+
+    Returns:
+        A Rich Table object containing resource information
+    """
+    table = Table(show_header=False, box=None, padding=(0, 1), expand=True)
+    table.add_column("Node", style="bright_green")
+    table.add_column("RAM", style="cyan")
+    table.add_column("GPU", style="magenta")
+
+    # Sort nodes to put local node first, then alphabetically
+    sorted_nodes = sorted(
+        self.node_resources.keys(),
+        key=lambda node_id: (node_id != self.local_node_id, node_id)
+    )
+
+    for node_id in sorted_nodes:
+        resource_data = self.node_resources[node_id]
+        is_local = node_id == self.local_node_id
+
+        if not resource_data or "ram" not in resource_data or "gpu" not in resource_data:
+            continue
+
+        # Format node ID with indicator for local node
+        node_text = Text(f"{'* ' if is_local else '  '}Node {node_id[:8]}")
+        if is_local:
+            node_text.stylize("bold bright_green")
+
+        # Format RAM usage
+        ram = resource_data["ram"]
+        ram_text = Text(f"RAM: {ram['used'] / (1024**3):.1f}GB/{ram['total'] / (1024**3):.1f}GB ({ram['percent']}%)")
+
+        # Format GPU usage
+        gpu = resource_data["gpu"]
+        if gpu.get("available", False):
+            gpu_text = Text(f"GPU: {gpu.get('used_memory', 0) / (1024**3):.1f}GB/{gpu.get('total_memory', 0) / (1024**3):.1f}GB ({gpu.get('memory_percent', 0)}%)")
+            if "utilization" in gpu:
+                gpu_text.append(f", Util: {gpu['utilization']}%")
+        else:
+            gpu_text = Text("GPU: Not available")
+
+        table.add_row(node_text, ram_text, gpu_text)
+
+    return table
 
   def _generate_download_layout(self) -> Table:
     summary = Table(show_header=False, box=None, padding=(0, 1), expand=True)
