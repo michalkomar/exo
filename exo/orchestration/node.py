@@ -6,6 +6,7 @@ import time
 import traceback
 from typing import List, Dict, Optional, Tuple, Union, Set
 from exo.networking import Discovery, PeerHandle, Server
+from exo.networking.peer_health_tracker import PeerHealthTracker
 from exo.inference.inference_engine import InferenceEngine, Shard
 from exo.topology.topology import Topology
 from exo.topology.device_capabilities import device_capabilities, UNKNOWN_DEVICE_CAPABILITIES
@@ -44,7 +45,7 @@ class Node:
     self.buffered_inputs: Dict[str, List[np.ndarray]] = {}
     self.buffered_partials: Dict[str, List[np.ndarray]] = {}
     self.checkpoints: Dict[str, Dict[str, int]] = {}
-    
+
     self.max_generate_tokens = max_generate_tokens
     self.topology_viz = topology_viz
     self.default_sample_temperature = default_sample_temperature
@@ -54,6 +55,9 @@ class Node:
     self.node_download_progress: Dict[str, RepoProgressEvent] = {}
     self.topology_inference_engines_pool: List[List[str]] = []
     self.outstanding_requests = {}
+
+    # Initialize the peer health tracker for circuit breaking
+    self.peer_health_tracker = PeerHealthTracker(failure_threshold=3, cooldown_period=60)
 
   async def start(self, wait_for_peers: int = 0) -> None:
     self.device_capabilities = await device_capabilities()
@@ -110,7 +114,7 @@ class Node:
 
   def get_topology_inference_engines(self) -> List[List[str]]:
     return self.topology_inference_engines_pool
-  
+
   token_count = 0
   first_token_time = 0
   async def process_inference_result(
@@ -219,7 +223,7 @@ class Node:
     self,
     base_shard: Shard,
     example: np.ndarray,
-    target: np.ndarray, 
+    target: np.ndarray,
     length: np.ndarray,
     request_id: Optional[str] = None,
     train: bool = False,
@@ -232,7 +236,7 @@ class Node:
       if request_id is None:
         request_id = str(uuid.uuid4())
       self.outstanding_requests[request_id] = "waiting"
-      loss = await self.forward_example(shard, example, target, length, train, request_id, 0) 
+      loss = await self.forward_example(shard, example, target, length, train, request_id, 0)
     return loss
 
   async def coordinate_save(
@@ -263,7 +267,7 @@ class Node:
     self,
     base_shard: Shard,
     example: np.ndarray,
-    target: np.ndarray, 
+    target: np.ndarray,
     length: np.ndarray,
     train: bool = False,
     request_id: Optional[str] = None,
@@ -308,7 +312,7 @@ class Node:
     self,
     base_shard: Shard,
     example: np.ndarray,
-    target: np.ndarray, 
+    target: np.ndarray,
     length: np.ndarray,
     train: bool = False,
     request_id: Optional[str] = None,
@@ -351,7 +355,7 @@ class Node:
       print(f"Error processing example for shard {shard}: {e}")
       traceback.print_exc()
       return None
-        
+
   async def process_tensor(
     self,
     base_shard: Shard,
@@ -380,13 +384,13 @@ class Node:
     try:
       self.outstanding_requests[request_id] = "processing"
       result, inference_state = await self.inference_engine.infer_tensor(request_id, shard, tensor, inference_state)
-      ret = await self.process_inference_result(shard, result, request_id, inference_state) 
+      ret = await self.process_inference_result(shard, result, request_id, inference_state)
       return ret
     except Exception as e:
       self.outstanding_requests.pop(request_id)
       print(f"Error processing tensor for shard {shard}: {e}")
       traceback.print_exc()
-  
+
   async def forward_example(
     self,
     base_shard: Shard,
@@ -428,7 +432,7 @@ class Node:
         raise ValueError(f"Peer for {target_index} not found")
       if DEBUG >= 1: print(f"Sending prompt to {target_peer.id()}: {prompt}")
       await target_peer.send_prompt(next_shard, prompt, request_id=request_id, inference_state=inference_state)
-  
+
   async def forward_tensor(
     self,
     base_shard: Shard,
@@ -584,33 +588,56 @@ class Node:
   def trigger_on_token_callbacks(self, request_id: str, tokens: List[int], is_finished: bool) -> None:
     if DEBUG >= 2: print(f"Triggering all on_token callbacks with {request_id=} {tokens=} {is_finished=}")
     self.on_token.trigger_all(request_id, tokens, is_finished)
-  
+
   async def broadcast_result(self, request_id: str, result: List[int], is_finished: bool) -> None:
     if DEBUG >= 2: print(f"Broadcasting result: {request_id=} {result=} {is_finished=}")
+
+    # Filter out unhealthy peers
+    healthy_peers = [peer for peer in self.peers if self.peer_health_tracker.is_healthy(peer.id())]
+
+    if len(healthy_peers) < len(self.peers) and DEBUG >= 2:
+      unhealthy_count = len(self.peers) - len(healthy_peers)
+      print(f"Skipping {unhealthy_count} unhealthy peers when broadcasting result")
+
     async def send_result_to_peer(peer):
       try:
-        await asyncio.wait_for(peer.send_result(request_id, result, is_finished), timeout=15.0)
+        await asyncio.wait_for(peer.send_result(request_id, result, is_finished), timeout=10.0)  # Reduced timeout
+        # Record successful operation
+        self.peer_health_tracker.record_success(peer.id())
       except asyncio.TimeoutError:
         print(f"Timeout broadcasting result to {peer.id()}")
+        self.peer_health_tracker.record_failure(peer.id())
       except Exception as e:
         print(f"Error broadcasting result to {peer.id()}: {e}")
+        self.peer_health_tracker.record_failure(peer.id())
         traceback.print_exc()
 
-    await asyncio.gather(*[send_result_to_peer(peer) for peer in self.peers], return_exceptions=True)
+    await asyncio.gather(*[send_result_to_peer(peer) for peer in healthy_peers], return_exceptions=True)
 
   async def broadcast_opaque_status(self, request_id: str, status: str) -> None:
     if DEBUG >= 8: print(f"Broadcasting opaque status: {request_id=} {status=}")
 
+    # Filter out unhealthy peers
+    healthy_peers = [peer for peer in self.peers if self.peer_health_tracker.is_healthy(peer.id())]
+
+    if len(healthy_peers) < len(self.peers) and DEBUG >= 2:
+      unhealthy_count = len(self.peers) - len(healthy_peers)
+      print(f"Skipping {unhealthy_count} unhealthy peers when broadcasting status")
+
     async def send_status_to_peer(peer):
       try:
-        await asyncio.wait_for(peer.send_opaque_status(request_id, status), timeout=15.0)
+        await asyncio.wait_for(peer.send_opaque_status(request_id, status), timeout=10.0)  # Reduced timeout
+        # Record successful operation
+        self.peer_health_tracker.record_success(peer.id())
       except asyncio.TimeoutError:
         print(f"Timeout sending opaque status to {peer.id()}")
+        self.peer_health_tracker.record_failure(peer.id())
       except Exception as e:
         print(f"Error sending opaque status to {peer.id()}: {e}")
+        self.peer_health_tracker.record_failure(peer.id())
         traceback.print_exc()
 
-    await asyncio.gather(*[send_status_to_peer(peer) for peer in self.peers], return_exceptions=True)
+    await asyncio.gather(*[send_status_to_peer(peer) for peer in healthy_peers], return_exceptions=True)
     # in the case of opaque status, we also want to receive our own opaque statuses
     self.on_opaque_status.trigger_all(request_id, status)
 

@@ -81,6 +81,13 @@ class GRPCPeerHandle(PeerHandle):
         if DEBUG >= 2: print(f"Connection timeout for {self._id}@{self.address}")
         await self.disconnect()
         raise
+    else:
+      # Check if the channel is in a good state
+      channel_state = self.channel.get_state()
+      if channel_state in [grpc.ChannelConnectivity.TRANSIENT_FAILURE, grpc.ChannelConnectivity.IDLE]:
+        if DEBUG >= 2: print(f"Channel in bad state ({channel_state}) for {self._id}@{self.address}, reconnecting")
+        await self.disconnect()
+        await asyncio.wait_for(self.connect(), timeout=10.0)
 
   async def health_check(self) -> bool:
     try:

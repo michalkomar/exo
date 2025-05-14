@@ -37,11 +37,11 @@ class GRPCServer(node_service_pb2_grpc.NodeServiceServicer):
         ("grpc.http2.max_pings_without_data", 0),
         ("grpc.http2.min_time_between_pings_ms", 10000),
         ("grpc.http2.min_ping_interval_without_data_ms", 5000),
-        ("grpc.max_concurrent_streams", 100),
+        ("grpc.max_concurrent_streams", 100),  # Set a reasonable limit
         ("grpc.tcp_nodelay", 1),
         ("grpc.optimization_target", "throughput"),
         ("grpc.keepalive_permit_without_calls", 1),
-        ("grpc.http2.max_concurrent_streams", 0),  # Unlimited concurrent streams
+        # Removed conflicting setting for max_concurrent_streams
       ],
     )
     node_service_pb2_grpc.add_NodeServiceServicer_to_server(self, self.server)
