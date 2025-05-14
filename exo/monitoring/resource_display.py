@@ -73,8 +73,19 @@ class ResourceDisplay:
             return
 
         # If we have a topology visualization, update it
-        if self.topology_viz:
-            self.topology_viz.update_resource_display(self.node_resources, self.local_node_id)
+        # Use a direct reference to avoid potential recursion
+        if self.topology_viz and hasattr(self.topology_viz, 'node_resources'):
+            # Update the topology_viz's node_resources directly instead of calling a method
+            # This prevents potential recursion between the two classes
+            self.topology_viz.node_resources = self.node_resources
+            self.topology_viz.local_node_id = self.local_node_id
+            # Only refresh if the topology_viz is already initialized
+            if hasattr(self.topology_viz, 'refresh') and callable(self.topology_viz.refresh):
+                try:
+                    self.topology_viz.refresh()
+                except RecursionError:
+                    # Avoid recursion errors by not refreshing if we're already in a refresh cycle
+                    pass
 
     def get_resource_panel(self) -> Optional[Panel]:
         """

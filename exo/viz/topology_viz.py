@@ -28,6 +28,7 @@ class TopologyViz:
     self.node_resources: Dict[str, Dict] = {}
     self.local_node_id = None
     self.requests: OrderedDict[str, Tuple[str, str]] = {}
+    self._resource_data_updated = False
 
     self.console = Console()
     self.layout = Layout()
@@ -85,40 +86,58 @@ class TopologyViz:
         node_resources: Dictionary mapping node IDs to resource data
         local_node_id: ID of the local node
     """
+    # Store the data but don't refresh immediately to prevent recursion
+    # The refresh will happen on the next UI update cycle
     self.node_resources = node_resources
     self.local_node_id = local_node_id
-    self.refresh()
+
+    # Use a flag to indicate resource data has changed
+    self._resource_data_updated = True
 
   def refresh(self):
-    self.main_panel.renderable = self._generate_main_layout()
-    # Update the panel title with the number of nodes and partitions
-    node_count = len(self.topology.nodes)
-    self.main_panel.title = f"Exo Cluster ({node_count} node{'s' if node_count != 1 else ''})"
+    # Prevent recursion by using a flag
+    in_refresh = getattr(self, '_in_refresh', False)
+    if in_refresh:
+      return
 
-    # Update and show/hide resource panel
-    if self.node_resources:
-      self.resource_panel.renderable = self._generate_resource_layout()
-      self.layout["resource"].update(self.resource_panel)
-      self.layout["resource"].visible = True
-    else:
-      self.layout["resource"].visible = False
+    # Set flag to indicate we're in a refresh cycle
+    self._in_refresh = True
 
-    # Update and show/hide prompt and output panel
-    if any(r[0] or r[1] for r in self.requests.values()):
-      self.prompt_output_panel = self._generate_prompt_output_layout()
-      self.layout["prompt_output"].update(self.prompt_output_panel)
-      self.layout["prompt_output"].visible = True
-    else:
-      self.layout["prompt_output"].visible = False
+    try:
+      self.main_panel.renderable = self._generate_main_layout()
+      # Update the panel title with the number of nodes and partitions
+      node_count = len(self.topology.nodes)
+      self.main_panel.title = f"Exo Cluster ({node_count} node{'s' if node_count != 1 else ''})"
 
-    # Only show download_panel if there are in-progress downloads
-    if any(progress.status == "in_progress" for progress in self.node_download_progress.values()):
-      self.download_panel.renderable = self._generate_download_layout()
-      self.layout["download"].visible = True
-    else:
-      self.layout["download"].visible = False
+      # Update and show/hide resource panel if we have resource data or it was updated
+      if self.node_resources:
+        self.resource_panel.renderable = self._generate_resource_layout()
+        self.layout["resource"].update(self.resource_panel)
+        self.layout["resource"].visible = True
+        # Reset the update flag
+        self._resource_data_updated = False
+      else:
+        self.layout["resource"].visible = False
 
-    self.live_panel.update(self.layout, refresh=True)
+      # Update and show/hide prompt and output panel
+      if any(r[0] or r[1] for r in self.requests.values()):
+        self.prompt_output_panel = self._generate_prompt_output_layout()
+        self.layout["prompt_output"].update(self.prompt_output_panel)
+        self.layout["prompt_output"].visible = True
+      else:
+        self.layout["prompt_output"].visible = False
+
+      # Only show download_panel if there are in-progress downloads
+      if any(progress.status == "in_progress" for progress in self.node_download_progress.values()):
+        self.download_panel.renderable = self._generate_download_layout()
+        self.layout["download"].visible = True
+      else:
+        self.layout["download"].visible = False
+
+      self.live_panel.update(self.layout, refresh=True)
+    finally:
+      # Always reset the flag when we're done
+      self._in_refresh = False
 
   def _generate_prompt_output_layout(self) -> Panel:
     content = []

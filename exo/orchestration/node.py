@@ -106,7 +106,11 @@ class Node:
         resource_data = status_data.get("resource_data")
         if node_id and resource_data:
           # Update the resource display with peer data
-          resource_display.update(node_id, resource_data)
+          try:
+            resource_display.update(node_id, resource_data)
+          except Exception as e:
+            if DEBUG >= 2:
+              print(f"Error updating resource display with peer data: {e}")
 
       download_progress = None
       if status_type == "download_progress":
@@ -593,32 +597,58 @@ class Node:
     Args:
         interval: Time in seconds between resource updates
     """
+    # Add a small delay before starting to avoid initialization race conditions
+    await asyncio.sleep(1.0)
+
     while True:
       try:
-        # Collect local resource usage
-        resource_data = await resource_monitor.get_resource_usage()
+        # Collect local resource usage with a timeout to prevent blocking
+        try:
+          resource_data = await asyncio.wait_for(
+            resource_monitor.get_resource_usage(),
+            timeout=2.0  # 2 second timeout for resource collection
+          )
+        except asyncio.TimeoutError:
+          if DEBUG >= 2:
+            print("Resource monitoring timed out, will retry next interval")
+          await asyncio.sleep(interval)
+          continue
 
         if resource_data:
-          # Update local display
-          resource_display.update(self.id, resource_data)
+          # Update local display - catch any UI-related errors
+          try:
+            resource_display.update(self.id, resource_data)
+          except Exception as ui_error:
+            if DEBUG >= 1:
+              print(f"Error updating resource display: {ui_error}")
 
           # Broadcast to peers
-          asyncio.create_task(
-            self.broadcast_opaque_status(
-              "",
-              json.dumps({
-                "type": "resource_usage",
-                "node_id": self.id,
-                "resource_data": resource_data
-              })
+          try:
+            asyncio.create_task(
+              self.broadcast_opaque_status(
+                "",
+                json.dumps({
+                  "type": "resource_usage",
+                  "node_id": self.id,
+                  "resource_data": resource_data
+                })
+              )
             )
-          )
+          except Exception as broadcast_error:
+            if DEBUG >= 1:
+              print(f"Error broadcasting resource data: {broadcast_error}")
       except Exception as e:
         if DEBUG >= 1:
           print(f"Error in resource monitoring: {e}")
-          traceback.print_exc()
+          if DEBUG >= 2:
+            traceback.print_exc()
 
-      await asyncio.sleep(interval)
+      # Sleep with a try/except to handle potential interruptions
+      try:
+        await asyncio.sleep(interval)
+      except asyncio.CancelledError:
+        # Allow clean cancellation
+        break
 
   async def collect_topology(self, visited: set[str], max_depth: int = 4) -> Topology:
     next_topology = Topology()
