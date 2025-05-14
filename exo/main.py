@@ -22,6 +22,8 @@ from exo.api import ChatGPTAPI
 from exo.download.shard_download import ShardDownloader, NoopShardDownloader
 from exo.download.download_progress import RepoProgressEvent
 from exo.download.new_shard_download import new_shard_downloader, has_exo_home_read_access, has_exo_home_write_access, ensure_exo_home, seed_models
+from exo.download.console_progress import console_progress
+from exo.monitoring.resource_display import resource_display
 from exo.helpers import print_yellow_exo, find_available_port, DEBUG, get_system_info, get_or_create_node_id, get_all_ip_addresses_and_interfaces, terminal_link, shutdown
 from exo.inference.shard import Shard
 from exo.inference.inference_engine import get_inference_engine
@@ -211,9 +213,16 @@ def throttled_broadcast(shard: Shard, event: RepoProgressEvent):
   global last_events
   current_time = time.time()
   if event.status == "not_started": return
+
+  # Update the console progress display
+  console_progress.update(shard, event)
+
+  # Throttle broadcasts to other nodes
   last_event = last_events.get(shard.model_id)
   if last_event and last_event[1].status == "complete" and event.status == "complete": return
   if last_event and last_event[0] == event.status and current_time - last_event[0] < 0.2: return
+
+  # Store the event and broadcast it
   last_events[shard.model_id] = (current_time, event)
   asyncio.create_task(node.broadcast_opaque_status("", json.dumps({"type": "download_progress", "node_id": node.id, "progress": event.to_dict()})))
 shard_downloader.on_progress.register("broadcast").on_next(throttled_broadcast)
@@ -340,6 +349,10 @@ async def main():
 
   # Use a more direct approach to handle signals
   def handle_exit():
+    # Clear the console progress display
+    console_progress.clear()
+    # Clear the resource display
+    resource_display.clear()
     asyncio.ensure_future(shutdown(signal.SIGTERM, loop, node.server))
 
   if platform.system() != "Windows":

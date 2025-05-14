@@ -17,6 +17,8 @@ from exo.viz.topology_viz import TopologyViz
 from exo.download.download_progress import RepoProgressEvent
 from exo.inference.inference_engine import get_inference_engine, InferenceEngine
 from exo.download.shard_download import ShardDownloader
+from exo.monitoring.resource_monitor import resource_monitor
+from exo.monitoring.resource_display import resource_display
 
 class Node:
   def __init__(
@@ -66,7 +68,13 @@ class Node:
     await self.update_peers(wait_for_peers)
     await self.collect_topology(set())
     if DEBUG >= 2: print(f"Collected topology: {self.topology}")
+
+    # Set up resource monitoring
+    resource_display.set_local_node_id(self.id)
+
+    # Start periodic tasks
     asyncio.create_task(self.periodic_topology_collection(2.0))
+    asyncio.create_task(self.periodic_resource_monitoring(3.0))
 
   async def stop(self) -> None:
     await self.discovery.stop()
@@ -76,16 +84,26 @@ class Node:
     try:
       status_data = json.loads(opaque_status)
       status_type = status_data.get("type", "")
+
       if status_type == "supported_inference_engines":
         node_id = status_data.get("node_id")
         engines = status_data.get("engines", [])
         self.topology_inference_engines_pool.append(engines)
+
       elif status_type == "node_status":
         if status_data.get("status", "").startswith("start_"):
           self.current_topology.active_node_id = status_data.get("node_id")
         elif status_data.get("status", "").startswith("end_"):
           if status_data.get("node_id") == self.current_topology.active_node_id:
             self.current_topology.active_node_id = None
+
+      elif status_type == "resource_usage":
+        # Handle resource usage updates from peers
+        node_id = status_data.get("node_id")
+        resource_data = status_data.get("resource_data")
+        if node_id and resource_data:
+          # Update the resource display with peer data
+          resource_display.update(node_id, resource_data)
 
       download_progress = None
       if status_type == "download_progress":
@@ -564,6 +582,40 @@ class Node:
       except Exception as e:
         print(f"Error collecting topology: {e}")
         traceback.print_exc()
+
+  async def periodic_resource_monitoring(self, interval: float):
+    """
+    Periodically collect and broadcast resource usage information.
+
+    Args:
+        interval: Time in seconds between resource updates
+    """
+    while True:
+      try:
+        # Collect local resource usage
+        resource_data = await resource_monitor.get_resource_usage()
+
+        if resource_data:
+          # Update local display
+          resource_display.update(self.id, resource_data)
+
+          # Broadcast to peers
+          asyncio.create_task(
+            self.broadcast_opaque_status(
+              "",
+              json.dumps({
+                "type": "resource_usage",
+                "node_id": self.id,
+                "resource_data": resource_data
+              })
+            )
+          )
+      except Exception as e:
+        if DEBUG >= 1:
+          print(f"Error in resource monitoring: {e}")
+          traceback.print_exc()
+
+      await asyncio.sleep(interval)
 
   async def collect_topology(self, visited: set[str], max_depth: int = 4) -> Topology:
     next_topology = Topology()
