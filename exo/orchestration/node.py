@@ -500,24 +500,41 @@ class Node:
     async def connect_with_timeout(peer, timeout=5):
       try:
         await asyncio.wait_for(peer.connect(), timeout)
+        # Record successful connection
+        self.peer_health_tracker.record_success(peer.id())
         return True
       except Exception as e:
         print(f"Error connecting peer {peer.id()}@{peer.addr()}: {e}")
+        # Record connection failure
+        self.peer_health_tracker.record_failure(peer.id())
         traceback.print_exc()
         return False
 
+    # Only try to connect to healthy peers or peers that have no health record yet
+    healthy_peers_to_connect = [peer for peer in peers_to_connect
+                               if peer.id() not in self.peer_health_tracker.unhealthy_until
+                               or self.peer_health_tracker.is_healthy(peer.id())]
+
+    if len(healthy_peers_to_connect) < len(peers_to_connect) and DEBUG >= 2:
+      skipped_count = len(peers_to_connect) - len(healthy_peers_to_connect)
+      print(f"Skipping connection attempts to {skipped_count} unhealthy peers")
+
     disconnect_results = await asyncio.gather(*(disconnect_with_timeout(peer) for peer in peers_to_disconnect), return_exceptions=True)
-    connect_results = await asyncio.gather(*(connect_with_timeout(peer) for peer in peers_to_connect), return_exceptions=True)
+    connect_results = await asyncio.gather(*(connect_with_timeout(peer) for peer in healthy_peers_to_connect), return_exceptions=True)
 
     successful_disconnects = [peer for peer, result in zip(peers_to_disconnect, disconnect_results) if result is True]
     failed_disconnects = [peer for peer, result in zip(peers_to_disconnect, disconnect_results) if result is False]
-    successful_connects = [peer for peer, result in zip(peers_to_connect, connect_results) if result is True]
-    failed_connects = [peer for peer, result in zip(peers_to_connect, connect_results) if result is False]
+    successful_connects = [peer for peer, result in zip(healthy_peers_to_connect, connect_results) if result is True]
+    failed_connects = [peer for peer, result in zip(healthy_peers_to_connect, connect_results) if result is False]
+
+    # Also count skipped peers as failed connects for logging purposes
+    skipped_connects = [peer for peer in peers_to_connect if peer not in healthy_peers_to_connect]
     if DEBUG >= 1:
       if successful_disconnects: print(f"Successfully disconnected peers: {_pretty(successful_disconnects)}")
       if failed_disconnects: print(f"Failed to disconnect peers: {_pretty(failed_disconnects)}")
       if successful_connects: print(f"Successfully connected peers: {_pretty(successful_connects)}")
       if failed_connects: print(f"Failed to connect peers: {_pretty(failed_connects)}")
+      if skipped_connects: print(f"Skipped connecting to unhealthy peers: {_pretty(skipped_connects)}")
 
     self.peers = next_peers
     return len(peers_added) > 0 or len(peers_removed) > 0 or len(peers_updated) > 0
@@ -533,11 +550,17 @@ class Node:
     while True:
       await asyncio.sleep(interval)
       try:
-        did_peers_change = await self.update_peers()
+        # Use a shorter timeout for update_peers to avoid blocking too long
+        did_peers_change = await asyncio.wait_for(self.update_peers(), timeout=10.0)
         if DEBUG >= 2: print(f"{did_peers_change=}")
-        await self.collect_topology(set())
+
+        # Use a shorter timeout for collect_topology
+        await asyncio.wait_for(self.collect_topology(set()), timeout=15.0)
+
         if did_peers_change:
           await self.select_best_inference_engine()
+      except asyncio.TimeoutError:
+        print("Timeout during periodic topology collection, will retry next interval")
       except Exception as e:
         print(f"Error collecting topology: {e}")
         traceback.print_exc()
@@ -552,10 +575,20 @@ class Node:
     visited.add(self.id)
     visited.update(p.id() for p in self.peers)
 
+    # Filter out unhealthy peers
+    healthy_peers = [peer for peer in self.peers if self.peer_health_tracker.is_healthy(peer.id())]
+
+    if len(healthy_peers) < len(self.peers) and DEBUG >= 2:
+      unhealthy_count = len(self.peers) - len(healthy_peers)
+      print(f"Skipping {unhealthy_count} unhealthy peers when collecting topology")
+
+    # Add all peers to the topology, even unhealthy ones
     for peer in self.peers:
       next_topology.update_node(peer.id(), peer.device_capabilities())
       next_topology.add_edge(self.id, peer.id(), peer.description())
 
+    # Only collect topology from healthy peers
+    for peer in healthy_peers:
       if peer.id() in prev_visited:
         continue
 
@@ -567,8 +600,12 @@ class Node:
         other_topology = await asyncio.wait_for(peer.collect_topology(visited, max_depth=max_depth - 1), timeout=5.0)
         if DEBUG >= 2: print(f"Collected topology from: {peer.id()}: {other_topology}")
         next_topology.merge(peer.id(), other_topology)
+        # Record successful operation
+        self.peer_health_tracker.record_success(peer.id())
       except Exception as e:
         print(f"Error collecting topology from {peer.id()}: {e}")
+        # Record failure
+        self.peer_health_tracker.record_failure(peer.id())
         traceback.print_exc()
 
     next_topology.active_node_id = self.topology.active_node_id
